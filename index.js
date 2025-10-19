@@ -5,8 +5,11 @@ const { Pool } = pkg;
 
 const app = express();
 
-/** ---- CORS 設定：如有前端網域就限制，否則開放 ---- */
-const allowedOrigin = process.env.FRONTEND_ORIGIN; // 例如：https://elaineworkout.zeabur.app
+/** ---------------- CORS ----------------
+ * 若你有固定前端網域（例如 https://elaineworkout.zeabur.app）
+ * 請在環境變數 FRONTEND_ORIGIN 設定它，否則預設允許所有來源。
+ */
+const allowedOrigin = process.env.FRONTEND_ORIGIN;
 if (allowedOrigin) {
   app.use(cors({ origin: allowedOrigin }));
 } else {
@@ -15,9 +18,9 @@ if (allowedOrigin) {
 
 app.use(express.json());
 
-/** ---- 資料庫連線（動態 SSL）----
- * 本機：不設 DATABASE_SSL，或把 URL 加 ?sslmode=disable
- * 雲端（Zeabur）：Environment Variables 設 DATABASE_SSL=true
+/** ------------- 資料庫連線（動態 SSL）-------------
+ * 本機開發：不設 DATABASE_SSL，或把 DATABASE_URL 加上 ?sslmode=disable
+ * 雲端（Zeabur）：環境變數設 DATABASE_SSL=true（或連線字串為 Zeabur PG）
  */
 const isProd =
   process.env.DATABASE_SSL === "true" ||
@@ -28,7 +31,7 @@ const pool = new Pool({
   ssl: isProd ? { rejectUnauthorized: false } : false,
 });
 
-/** ---- 確保資料表存在 ---- */
+/** ------------- 確保資料表存在 ------------- */
 await pool.query(`
 CREATE TABLE IF NOT EXISTS public.workout_logs (
   id SERIAL PRIMARY KEY,
@@ -40,10 +43,10 @@ CREATE TABLE IF NOT EXISTS public.workout_logs (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );`);
 
-/** ---- 健康檢查 ---- */
+/** ------------- 健康檢查 ------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/** ---- Create ---- */
+/** ------------- Create ------------- */
 app.post("/api/workouts", async (req, res) => {
   const { date, exercise, weight_kg, reps, note } = req.body || {};
   if (!date || !exercise) {
@@ -63,7 +66,7 @@ app.post("/api/workouts", async (req, res) => {
   }
 });
 
-/** ---- Read (最新在前) ---- */
+/** ------------- Read（最新在前） ------------- */
 app.get("/api/workouts", async (_req, res) => {
   try {
     const { rows } = await pool.query(
@@ -78,7 +81,7 @@ app.get("/api/workouts", async (_req, res) => {
   }
 });
 
-/** ---- Update ---- */
+/** ------------- Update ------------- */
 app.put("/api/workouts/:id", async (req, res) => {
   const { id } = req.params;
   const { date, exercise, weight_kg, reps, note } = req.body || {};
@@ -102,7 +105,7 @@ app.put("/api/workouts/:id", async (req, res) => {
   }
 });
 
-/** ---- Delete ---- */
+/** ------------- Delete ------------- */
 app.delete("/api/workouts/:id", async (req, res) => {
   const { id } = req.params;
   try {
@@ -118,7 +121,45 @@ app.delete("/api/workouts/:id", async (req, res) => {
   }
 });
 
-/** ---- Start ---- */
+/** ------------- 個人最佳：每個 exercise 最大重量 ------------- 
+ * 使用 DISTINCT ON (exercise) 先依動作分組，然後按照 weight_kg DESC, date DESC, id DESC
+ * 取每組第一筆（即最大重量，若重量相同則選最近日期/最新 id）。
+ */
+app.get("/api/bests", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT ON (exercise)
+        id, exercise, weight_kg, reps, note, date, created_at
+      FROM public.workout_logs
+      WHERE weight_kg IS NOT NULL
+      ORDER BY exercise, weight_kg DESC, date DESC, id DESC
+    `);
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** ------------- 指定動作的歷史紀錄（重量由大到小） ------------- */
+app.get("/api/bests/:exercise", async (req, res) => {
+  const name = req.params.exercise;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, exercise, weight_kg, reps, note, date, created_at
+       FROM public.workout_logs
+       WHERE exercise = $1 AND weight_kg IS NOT NULL
+       ORDER BY weight_kg DESC, date DESC, id DESC`,
+      [name]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** ------------- Start ------------- */
 const port = process.env.PORT || 3000;
 app.listen(port, () =>
   console.log(`API running on :${port} | SSL=${isProd ? "on" : "off"}`)
